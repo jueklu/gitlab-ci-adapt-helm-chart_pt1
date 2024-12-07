@@ -1,0 +1,74 @@
+### Variables
+variables:
+  # Define the image name, tagging it with the GitLab CI registry and the current commit SHA
+  IMAGE_SHA: $CI_REGISTRY_IMAGE/$CI_COMMIT_REF_SLUG:$CI_COMMIT_SHA
+  # Repository URL of the "Flask Web Application Manifest" project
+  GIT_REPO_URL: "git@gitlab.jklug.work:python/flask-app-helm.git"
+
+
+### Stages
+stages:
+  - build
+  - update_helm_chart
+
+
+### Build Container Image
+build_image:
+  image: docker:stable
+  stage: build
+  services:
+    - docker:dind
+  variables:
+    DOCKER_TLS_CERTDIR: ""
+  before_script:
+    # Login to GitLab Container Registry using predefined CI/CD variables
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+  script:
+    # Build the Docker image from the specified Dockerfile in the Dockerfiles directory
+    - docker build --pull -t $IMAGE_SHA -f Dockerfiles/Dockerfile .
+    # Push the built Docker image to the GitLab Container Registry
+    - docker push $IMAGE_SHA
+    # Print the image name
+    - echo $IMAGE_SHA
+  rules: 
+    # Rule: Run this job only for the main branch and if the specified Dockerfile exists
+    - if: $CI_COMMIT_BRANCH == "main"
+      exists:
+        - Dockerfiles/Dockerfile
+
+
+### Update Helm Chart
+update_helm_chart:
+  image: alpine:latest
+  stage: update_helm_chart
+  needs:
+    # Run this job only if the 'build_image' job succeeds
+    - build_image
+  variables:
+    HELM_REPO_BRANCH: "main"  # Branch of the external repository to update
+  script:
+    # Install required tools
+    - apk add --no-cache yq git openssh
+    # Configure SSH for Git
+    - mkdir -p ~/.ssh
+    - echo "$pipeline_key" > ~/.ssh/id_rsa  # Use the correct variable name
+    - chmod 600 ~/.ssh/id_rsa
+    - ssh-keyscan -H gitlab.jklug.work >> ~/.ssh/known_hosts
+    # Clone the external repository
+    - git clone --branch $HELM_REPO_BRANCH $GIT_REPO_URL helm-chart-repo
+    - cd helm-chart-repo
+    # Debug repository contents
+    - ls -R
+    - ls -R helm-chart
+    # Update the container image in the Helm chart's values.yaml
+    - yq e ".image.repository = \"$CI_REGISTRY_IMAGE/$CI_COMMIT_REF_SLUG\" | .image.tag = \"$CI_COMMIT_SHA\"" -i helm-chart/values.yaml
+    # Add and commit the changes
+    - git config --global user.email "ci@example.com"
+    - git config --global user.name "GitLab CI"
+    - git add helm-chart/values.yaml
+    - git commit -m "Update Helm chart with image $IMAGE_SHA"
+    # Push the changes back to the external repository
+    - git push origin $HELM_REPO_BRANCH
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    
